@@ -138,7 +138,7 @@ class HitachiClient:
                 html = await resp.text()
                 # Log snippet of first response to reveal login page structure
                 if not self._is_control_page(html):
-                    _LOGGER.debug("Non-control page received (first 800 chars): %s", html[:800])
+                    _LOGGER.error("LOGIN PAGE HTML: %s", html[:1000])
                 return html
             if resp.status == 401 and self._username:
                 www_auth = resp.headers.get("WWW-Authenticate", "")
