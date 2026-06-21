@@ -193,7 +193,7 @@ class HitachiClient:
                 self._parse_control_page(html, device)
                 devices.append(device)
                 _LOGGER.debug("Found %r", device)
-            except (aiohttp.ClientError, HitachiGatewayError) as exc:
+            except Exception as exc:
                 _LOGGER.debug("dev=%d error: %s", dev_id, exc)
                 continue
 

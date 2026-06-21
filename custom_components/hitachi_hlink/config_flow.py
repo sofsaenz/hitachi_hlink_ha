@@ -38,7 +38,6 @@ class HitachiHlinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             client = HitachiClient(host, port, username, password)
             try:
                 await client.discover_devices()
-                await client.close()
                 return self.async_create_entry(
                     title=f"Hitachi HLink ({host})",
                     data={
@@ -48,7 +47,9 @@ class HitachiHlinkConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_PASSWORD: password,
                     },
                 )
-            except HitachiGatewayError:
+            except Exception as exc:  # noqa: BLE001
+                import logging
+                logging.getLogger(__name__).exception("Setup failed: %s", exc)
                 errors["base"] = "cannot_connect"
             finally:
                 await client.close()
