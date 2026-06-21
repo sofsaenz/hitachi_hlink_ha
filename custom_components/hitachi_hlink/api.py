@@ -1,9 +1,13 @@
 """Local HTTP client for Hitachi HC-IOTGW (Aircloud Pro) gateway — index.cgi interface."""
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
+import re
 import ssl
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -47,6 +51,42 @@ class HitachiDevice:
         return f"HitachiDevice(id={self.dev_id}, name={self.name!r})"
 
 
+def _digest_auth_header(
+    username: str, password: str, method: str, uri: str, www_auth: str
+) -> str:
+    """Compute an Authorization: Digest header from a WWW-Authenticate challenge."""
+    realm  = re.search(r'realm="([^"]*)"',  www_auth)
+    nonce  = re.search(r'nonce="([^"]*)"',  www_auth)
+    opaque = re.search(r'opaque="([^"]*)"', www_auth)
+    qop    = re.search(r'qop="([^"]*)"',    www_auth)
+
+    realm_val  = realm.group(1)  if realm  else ""
+    nonce_val  = nonce.group(1)  if nonce  else ""
+    opaque_val = opaque.group(1) if opaque else None
+
+    ha1 = hashlib.md5(f"{username}:{realm_val}:{password}".encode()).hexdigest()
+    ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
+
+    if qop and "auth" in qop.group(1):
+        nc     = "00000001"
+        cnonce = hashlib.md5(os.urandom(8)).hexdigest()[:8]
+        resp   = hashlib.md5(f"{ha1}:{nonce_val}:{nc}:{cnonce}:auth:{ha2}".encode()).hexdigest()
+        header = (
+            f'Digest username="{username}", realm="{realm_val}", nonce="{nonce_val}", '
+            f'uri="{uri}", qop=auth, nc={nc}, cnonce="{cnonce}", response="{resp}"'
+        )
+    else:
+        resp   = hashlib.md5(f"{ha1}:{nonce_val}:{ha2}".encode()).hexdigest()
+        header = (
+            f'Digest username="{username}", realm="{realm_val}", nonce="{nonce_val}", '
+            f'uri="{uri}", response="{resp}"'
+        )
+
+    if opaque_val:
+        header += f', opaque="{opaque_val}"'
+    return header
+
+
 class HitachiClient:
     """Async HTTP client for the gateway's index.cgi endpoint."""
 
@@ -57,8 +97,9 @@ class HitachiClient:
         username: str | None = None,
         password: str | None = None,
     ) -> None:
-        self._base = f"https://{host}:{port}/index.cgi"
-        self._auth = aiohttp.BasicAuth(username, password) if username else None
+        self._base     = f"https://{host}:{port}/index.cgi"
+        self._username = username
+        self._password = password
         self._session: aiohttp.ClientSession | None = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -71,42 +112,86 @@ class HitachiClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    async def _get(self, params: dict) -> str:
+        """GET with automatic Basic→Digest auth fallback."""
+        session = await self._get_session()
+        url = self._base
+
+        # First attempt — try Basic Auth (or no auth)
+        basic_auth = (
+            aiohttp.BasicAuth(self._username, self._password)
+            if self._username else None
+        )
+        async with session.get(url, params=params, auth=basic_auth,
+                               timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 401 and self._username:
+                www_auth = resp.headers.get("WWW-Authenticate", "")
+                if "Digest" in www_auth:
+                    # Build URI for digest (path + query as sent by aiohttp)
+                    from yarl import URL
+                    built = URL(url).with_query(params)
+                    uri = built.path_qs
+                    digest_header = _digest_auth_header(
+                        self._username, self._password, "GET", uri, www_auth
+                    )
+                    async with session.get(
+                        url, params=params,
+                        headers={"Authorization": digest_header},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp2:
+                        resp2.raise_for_status()
+                        return await resp2.text()
+            resp.raise_for_status()
+            return await resp.text()
+
+    async def _post(self, data: dict) -> None:
+        """POST with automatic Basic→Digest auth fallback."""
+        session = await self._get_session()
+        url = self._base
+        basic_auth = (
+            aiohttp.BasicAuth(self._username, self._password)
+            if self._username else None
+        )
+        async with session.post(url, data=data, auth=basic_auth,
+                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 401 and self._username:
+                www_auth = resp.headers.get("WWW-Authenticate", "")
+                if "Digest" in www_auth:
+                    uri = urlparse(url).path
+                    digest_header = _digest_auth_header(
+                        self._username, self._password, "POST", uri, www_auth
+                    )
+                    async with session.post(
+                        url, data=data,
+                        headers={"Authorization": digest_header},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp2:
+                        resp2.raise_for_status()
+                        return
+            resp.raise_for_status()
+
     # ------------------------------------------------------------------
     # Device discovery
     # ------------------------------------------------------------------
 
     async def discover_devices(self) -> list[HitachiDevice]:
         """Probe device IDs 1–16, returning those with a valid control page."""
-        # Try to get room names from the device list page first.
         names = await self._fetch_device_names()
-
-        session = await self._get_session()
         devices: list[HitachiDevice] = []
 
         for dev_id in range(1, 17):
             params = {"mod": MOD_AC, "act": ACT_GET_DEVICE, "dev": dev_id, "Temp": 0}
             try:
-                async with session.get(
-                    self._base,
-                    params=params,
-                    auth=self._auth,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as resp:
-                    if resp.status != 200:
-                        continue
-                    html = await resp.text()
-
+                html = await self._get(params)
                 if not self._is_control_page(html):
-                    _LOGGER.debug("dev=%d: not a control page (login wall?), skipping", dev_id)
+                    _LOGGER.debug("dev=%d: not a control page, skipping", dev_id)
                     continue
-
                 name = names.get(dev_id, f"AC Unit {dev_id}")
                 device = HitachiDevice(dev_id, name)
                 self._parse_control_page(html, device)
                 devices.append(device)
                 _LOGGER.debug("Found %r", device)
-
-            except aiohttp.ClientError as exc:
+            except (aiohttp.ClientError, HitachiGatewayError) as exc:
                 _LOGGER.debug("dev=%d error: %s", dev_id, exc)
                 continue
 
@@ -114,24 +199,14 @@ class HitachiClient:
             raise HitachiGatewayError(
                 "No AC units found. Check the gateway IP, port, and credentials."
             )
-
         return devices
 
     async def _fetch_device_names(self) -> dict[int, str]:
         """Return {dev_id: room_name} from the device list page (best-effort)."""
         params = {"mod": MOD_DEVICE_LIST, "act": ACT_DEVICE_LIST}
-        session = await self._get_session()
         try:
-            async with session.get(
-                self._base,
-                params=params,
-                auth=self._auth,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    return {}
-                html = await resp.text()
-        except aiohttp.ClientError:
+            html = await self._get(params)
+        except (aiohttp.ClientError, HitachiGatewayError):
             return {}
 
         soup = BeautifulSoup(html, "html.parser")
@@ -166,19 +241,10 @@ class HitachiClient:
 
     async def fetch_state(self, device: HitachiDevice) -> None:
         params = {"mod": MOD_AC, "act": ACT_GET_DEVICE, "dev": device.dev_id, "Temp": 0}
-        session = await self._get_session()
         try:
-            async with session.get(
-                self._base,
-                params=params,
-                auth=self._auth,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                resp.raise_for_status()
-                html = await resp.text()
+            html = await self._get(params)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed reading device {device.dev_id}: {exc}") from exc
-
         self._parse_control_page(html, device)
 
     @staticmethod
@@ -242,15 +308,8 @@ class HitachiClient:
             "Temp":          temperature    if temperature    is not None else device.temperature,
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        session = await self._get_session()
         try:
-            async with session.post(
-                self._base,
-                data=payload,
-                auth=self._auth,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                resp.raise_for_status()
+            await self._post(payload)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
 
