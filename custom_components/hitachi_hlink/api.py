@@ -18,10 +18,13 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Gateway uses a self-signed TLS cert on the local network.
+# Gateway uses a self-signed TLS cert — skip verification.
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
+
+# Fields that must appear on a real device control page.
+_CONTROL_PAGE_MARKERS = ("OnOff", "OperationMode", "FanSpeed")
 
 
 class HitachiGatewayError(Exception):
@@ -34,7 +37,6 @@ class HitachiDevice:
     def __init__(self, dev_id: int, name: str) -> None:
         self.dev_id = dev_id
         self.name = name
-        # Mutable state updated by fetch_state()
         self.on_off: str = "0"
         self.operation_mode: str = "4"
         self.temperature: int = 22
@@ -48,11 +50,18 @@ class HitachiDevice:
 class HitachiClient:
     """Async HTTP client for the gateway's index.cgi endpoint."""
 
-    def __init__(self, host: str, port: int = 443) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int = 443,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> None:
         self._base = f"https://{host}:{port}/index.cgi"
+        self._auth = aiohttp.BasicAuth(username, password) if username else None
         self._session: aiohttp.ClientSession | None = None
 
-    async def _session_(self) -> aiohttp.ClientSession:
+    async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(ssl=_SSL_CTX)
             self._session = aiohttp.ClientSession(connector=connector)
@@ -63,64 +72,71 @@ class HitachiClient:
             await self._session.close()
 
     # ------------------------------------------------------------------
-    # Device discovery  (mod=1&act=11 → device list page)
+    # Device discovery
     # ------------------------------------------------------------------
 
     async def discover_devices(self) -> list[HitachiDevice]:
-        """Discover devices by parsing the gateway list page, then probing IDs as fallback."""
-        # Step 1: try the device list page for real room names
-        names: dict[int, str] = {}
-        params = {"mod": MOD_DEVICE_LIST, "act": ACT_DEVICE_LIST}
-        session = await self._session_()
-        try:
-            async with session.get(
-                self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    names = self._parse_device_list_names(html)
-                    _LOGGER.debug("Device list page returned names: %s", names)
-        except aiohttp.ClientError as exc:
-            _LOGGER.warning("Could not fetch device list page: %s", exc)
+        """Probe device IDs 1–16, returning those with a valid control page."""
+        # Try to get room names from the device list page first.
+        names = await self._fetch_device_names()
 
-        # Step 2: probe device IDs 1–16 directly to confirm which ones exist
+        session = await self._get_session()
         devices: list[HitachiDevice] = []
+
         for dev_id in range(1, 17):
-            dev_params = {
-                "mod": MOD_AC,
-                "act": ACT_GET_DEVICE,
-                "dev": dev_id,
-                "Temp": 0,
-            }
+            params = {"mod": MOD_AC, "act": ACT_GET_DEVICE, "dev": dev_id, "Temp": 0}
             try:
                 async with session.get(
-                    self._base, params=dev_params, timeout=aiohttp.ClientTimeout(total=5)
+                    self._base,
+                    params=params,
+                    auth=self._auth,
+                    timeout=aiohttp.ClientTimeout(total=5),
                 ) as resp:
                     if resp.status != 200:
                         continue
                     html = await resp.text()
-                    # A valid device control page always contains the OnOff field
-                    if "OnOff" not in html:
-                        continue
-                    name = names.get(dev_id, f"AC Unit {dev_id}")
-                    device = HitachiDevice(dev_id, name)
-                    self._parse_control_page(html, device)
-                    devices.append(device)
-                    _LOGGER.debug("Found device id=%d name=%r", dev_id, name)
-            except aiohttp.ClientError:
+
+                if not self._is_control_page(html):
+                    _LOGGER.debug("dev=%d: not a control page (login wall?), skipping", dev_id)
+                    continue
+
+                name = names.get(dev_id, f"AC Unit {dev_id}")
+                device = HitachiDevice(dev_id, name)
+                self._parse_control_page(html, device)
+                devices.append(device)
+                _LOGGER.debug("Found %r", device)
+
+            except aiohttp.ClientError as exc:
+                _LOGGER.debug("dev=%d error: %s", dev_id, exc)
                 continue
 
         if not devices:
-            raise HitachiGatewayError("No AC units responded on the gateway.")
+            raise HitachiGatewayError(
+                "No AC units found. Check the gateway IP, port, and credentials."
+            )
 
         return devices
 
-    def _parse_device_list_names(self, html: str) -> dict[int, str]:
+    async def _fetch_device_names(self) -> dict[int, str]:
         """Return {dev_id: room_name} from the device list page (best-effort)."""
+        params = {"mod": MOD_DEVICE_LIST, "act": ACT_DEVICE_LIST}
+        session = await self._get_session()
+        try:
+            async with session.get(
+                self._base,
+                params=params,
+                auth=self._auth,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return {}
+                html = await resp.text()
+        except aiohttp.ClientError:
+            return {}
+
         soup = BeautifulSoup(html, "html.parser")
         names: dict[int, str] = {}
 
-        # Try <a href="...dev=N...">Room name</a>
         for tag in soup.find_all("a", href=True):
             href: str = tag["href"]
             if "act=31" in href and "dev=" in href:
@@ -128,44 +144,35 @@ class HitachiClient:
                 if dev_id:
                     names[int(dev_id)] = tag.get_text(strip=True) or f"AC Unit {dev_id}"
 
-        # Try div.myshow (onclick or data navigation)
         if not names:
             for div in soup.find_all("div", class_="myshow"):
                 text = div.get_text(strip=True)
                 for attr in ("onclick", "data-href", "data-url"):
-                    val = div.get(attr, "")
-                    dev_id = self._extract_param(val, "dev")
+                    dev_id = self._extract_param(div.get(attr, ""), "dev")
                     if dev_id:
                         names[int(dev_id)] = text or f"AC Unit {dev_id}"
                         break
 
+        _LOGGER.debug("Device name map from list page: %s", names)
         return names
 
     @staticmethod
-    def _extract_param(text: str, param: str) -> str | None:
-        """Extract a query-string parameter value from a URL or onclick string."""
-        key = f"{param}="
-        idx = text.find(key)
-        if idx == -1:
-            return None
-        start = idx + len(key)
-        end = start
-        while end < len(text) and text[end].isdigit():
-            end += 1
-        value = text[start:end]
-        return value if value else None
+    def _is_control_page(html: str) -> bool:
+        return any(m in html for m in _CONTROL_PAGE_MARKERS)
 
     # ------------------------------------------------------------------
-    # State reading  (mod=3&act=31&dev=N)
+    # State reading
     # ------------------------------------------------------------------
 
     async def fetch_state(self, device: HitachiDevice) -> None:
-        """GET the device control page and parse current field values."""
         params = {"mod": MOD_AC, "act": ACT_GET_DEVICE, "dev": device.dev_id, "Temp": 0}
-        session = await self._session_()
+        session = await self._get_session()
         try:
             async with session.get(
-                self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
+                self._base,
+                params=params,
+                auth=self._auth,
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 resp.raise_for_status()
                 html = await resp.text()
@@ -183,9 +190,7 @@ class HitachiClient:
             if tag is None:
                 return None
             opt = tag.find("option", selected=True)
-            if opt:
-                return opt.get("value")
-            return tag.get("value")
+            return opt.get("value") if opt else tag.get("value")
 
         if (v := selected_value("OnOff")) is not None:
             device.on_off = v
@@ -194,16 +199,14 @@ class HitachiClient:
         if (v := selected_value("FanSpeed")) is not None:
             device.fan_speed = v
 
-        # Temperature setpoint hidden input or named input
         for tag in soup.find_all("input", {"name": "Temp"}):
             try:
                 device.temperature = int(tag.get("value", device.temperature))
             except (ValueError, TypeError):
                 pass
 
-        # Room temperature — read-only display element
-        for candidate_id in ("RoomTemp", "roomTemp", "room_temp"):
-            tag = soup.find(id=candidate_id)
+        for candidate in ("RoomTemp", "roomTemp", "room_temp"):
+            tag = soup.find(id=candidate)
             if tag:
                 try:
                     device.room_temp = float(tag.get_text(strip=True))
@@ -218,7 +221,7 @@ class HitachiClient:
         )
 
     # ------------------------------------------------------------------
-    # State writing  (POST mod=3&act=33&dev=N)
+    # State writing
     # ------------------------------------------------------------------
 
     async def set_state(
@@ -230,7 +233,6 @@ class HitachiClient:
         temperature: int | None = None,
         fan_speed: str | None = None,
     ) -> None:
-        """POST updated values. Always sends the full form so the gateway gets a complete payload."""
         payload: dict[str, Any] = {
             "mod": MOD_AC,
             "act": ACT_SET_DEVICE,
@@ -240,17 +242,32 @@ class HitachiClient:
             "Temp":          temperature    if temperature    is not None else device.temperature,
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        session = await self._session_()
+        session = await self._get_session()
         try:
             async with session.post(
-                self._base, data=payload, timeout=aiohttp.ClientTimeout(total=10)
+                self._base,
+                data=payload,
+                auth=self._auth,
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 resp.raise_for_status()
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
 
-        # Optimistic local update
         if on_off         is not None: device.on_off         = on_off
         if operation_mode is not None: device.operation_mode = operation_mode
         if temperature    is not None: device.temperature    = temperature
         if fan_speed      is not None: device.fan_speed      = fan_speed
+
+    @staticmethod
+    def _extract_param(text: str, param: str) -> str | None:
+        key = f"{param}="
+        idx = text.find(key)
+        if idx == -1:
+            return None
+        start = idx + len(key)
+        end = start
+        while end < len(text) and text[end].isdigit():
+            end += 1
+        value = text[start:end]
+        return value if value else None

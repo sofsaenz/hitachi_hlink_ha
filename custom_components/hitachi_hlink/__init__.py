@@ -5,7 +5,7 @@ import logging
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PORT, Platform
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -17,9 +17,11 @@ PLATFORMS = [Platform.CLIMATE]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    host = entry.data[CONF_HOST]
-    port = entry.data.get(CONF_PORT, DEFAULT_PORT)
-    client = HitachiClient(host, port)
+    host     = entry.data[CONF_HOST]
+    port     = entry.data.get(CONF_PORT, DEFAULT_PORT)
+    username = entry.data.get(CONF_USERNAME) or None
+    password = entry.data.get(CONF_PASSWORD) or None
+    client   = HitachiClient(host, port, username, password)
 
     try:
         found = await client.discover_devices()

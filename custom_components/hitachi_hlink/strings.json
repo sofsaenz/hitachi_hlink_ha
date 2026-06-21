@@ -6,7 +6,9 @@
         "description": "Enter the local IP address of your HC-IOTGW gateway.",
         "data": {
           "host": "Gateway IP address",
-          "port": "HTTPS port (default 443)"
+          "port": "HTTPS port (default 443)",
+          "username": "Username (leave blank if no login required)",
+          "password": "Password (leave blank if no login required)"
         }
       }
     },
