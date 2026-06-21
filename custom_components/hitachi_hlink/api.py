@@ -127,15 +127,19 @@ class HitachiClient:
         return f"Basic {token}"
 
     async def _get(self, params: dict) -> str:
-        """GET with auth — waits for 401 challenge to determine auth type."""
+        """GET with auth — waits for 401 challenge or handles form login."""
         session = await self._get_session()
         url = self._base
 
-        # First attempt without auth to see what the server wants.
         async with session.get(url, params=params,
                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            _LOGGER.debug("GET %s status=%d", params, resp.status)
             if resp.status == 200:
-                return await resp.text()
+                html = await resp.text()
+                # Log snippet of first response to reveal login page structure
+                if not self._is_control_page(html):
+                    _LOGGER.debug("Non-control page received (first 800 chars): %s", html[:800])
+                return html
             if resp.status == 401 and self._username:
                 www_auth = resp.headers.get("WWW-Authenticate", "")
                 _LOGGER.debug("GET 401, WWW-Authenticate: %s", www_auth)
@@ -148,6 +152,7 @@ class HitachiClient:
                     _LOGGER.debug("GET retry status: %d", resp2.status)
                     resp2.raise_for_status()
                     return await resp2.text()
+            _LOGGER.debug("GET unexpected status %d", resp.status)
             resp.raise_for_status()
             return await resp.text()
 
