@@ -24,12 +24,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         found = await client.discover_devices()
     except HitachiGatewayError as exc:
-        _LOGGER.error("Cannot connect to Hitachi gateway at %s: %s", host, exc)
-        await client.close()
-        return False
-
-    if not found:
-        _LOGGER.error("No AC units found on gateway at %s", host)
+        _LOGGER.error("Hitachi gateway at %s: %s", host, exc)
         await client.close()
         return False
 

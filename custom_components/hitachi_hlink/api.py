@@ -67,50 +67,79 @@ class HitachiClient:
     # ------------------------------------------------------------------
 
     async def discover_devices(self) -> list[HitachiDevice]:
-        """Parse the gateway device list to get real device names and IDs."""
+        """Discover devices by parsing the gateway list page, then probing IDs as fallback."""
+        # Step 1: try the device list page for real room names
+        names: dict[int, str] = {}
         params = {"mod": MOD_DEVICE_LIST, "act": ACT_DEVICE_LIST}
         session = await self._session_()
         try:
             async with session.get(
                 self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
-                resp.raise_for_status()
-                html = await resp.text()
+                if resp.status == 200:
+                    html = await resp.text()
+                    names = self._parse_device_list_names(html)
+                    _LOGGER.debug("Device list page returned names: %s", names)
         except aiohttp.ClientError as exc:
-            raise HitachiGatewayError(f"Cannot reach gateway: {exc}") from exc
+            _LOGGER.warning("Could not fetch device list page: %s", exc)
 
-        return self._parse_device_list(html)
-
-    def _parse_device_list(self, html: str) -> list[HitachiDevice]:
-        """Extract device IDs and names from the device list table."""
-        soup = BeautifulSoup(html, "html.parser")
+        # Step 2: probe device IDs 1–16 directly to confirm which ones exist
         devices: list[HitachiDevice] = []
+        for dev_id in range(1, 17):
+            dev_params = {
+                "mod": MOD_AC,
+                "act": ACT_GET_DEVICE,
+                "dev": dev_id,
+                "Temp": 0,
+            }
+            try:
+                async with session.get(
+                    self._base, params=dev_params, timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    html = await resp.text()
+                    # A valid device control page always contains the OnOff field
+                    if "OnOff" not in html:
+                        continue
+                    name = names.get(dev_id, f"AC Unit {dev_id}")
+                    device = HitachiDevice(dev_id, name)
+                    self._parse_control_page(html, device)
+                    devices.append(device)
+                    _LOGGER.debug("Found device id=%d name=%r", dev_id, name)
+            except aiohttp.ClientError:
+                continue
 
-        # Each device row has a link or div that navigates to mod=3&act=31&dev=N
+        if not devices:
+            raise HitachiGatewayError("No AC units responded on the gateway.")
+
+        return devices
+
+    def _parse_device_list_names(self, html: str) -> dict[int, str]:
+        """Return {dev_id: room_name} from the device list page (best-effort)."""
+        soup = BeautifulSoup(html, "html.parser")
+        names: dict[int, str] = {}
+
+        # Try <a href="...dev=N...">Room name</a>
         for tag in soup.find_all("a", href=True):
             href: str = tag["href"]
             if "act=31" in href and "dev=" in href:
                 dev_id = self._extract_param(href, "dev")
-                if dev_id is None:
-                    continue
-                name = tag.get_text(strip=True) or f"AC Unit {dev_id}"
-                devices.append(HitachiDevice(int(dev_id), name))
+                if dev_id:
+                    names[int(dev_id)] = tag.get_text(strip=True) or f"AC Unit {dev_id}"
 
-        # Fallback: look for div.myshow elements with navigation (as seen in recording)
-        if not devices:
+        # Try div.myshow (onclick or data navigation)
+        if not names:
             for div in soup.find_all("div", class_="myshow"):
-                parent_row = div.find_parent("tr")
-                if not parent_row:
-                    continue
-                onclick = div.get("onclick", "")
-                dev_id = self._extract_param(onclick, "dev")
-                if dev_id is None:
-                    continue
-                name = div.get_text(strip=True) or f"AC Unit {dev_id}"
-                devices.append(HitachiDevice(int(dev_id), name))
+                text = div.get_text(strip=True)
+                for attr in ("onclick", "data-href", "data-url"):
+                    val = div.get(attr, "")
+                    dev_id = self._extract_param(val, "dev")
+                    if dev_id:
+                        names[int(dev_id)] = text or f"AC Unit {dev_id}"
+                        break
 
-        _LOGGER.debug("Discovered %d device(s): %s", len(devices), devices)
-        return devices
+        return names
 
     @staticmethod
     def _extract_param(text: str, param: str) -> str | None:
