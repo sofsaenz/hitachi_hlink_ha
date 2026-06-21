@@ -1,13 +1,9 @@
 """Local HTTP client for Hitachi HC-IOTGW (Aircloud Pro) gateway — index.cgi interface."""
 from __future__ import annotations
 
-import hashlib
 import logging
-import os
-import re
 import ssl
 from typing import Any
-from urllib.parse import urlparse  # used in _make_auth_header POST path
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -51,41 +47,6 @@ class HitachiDevice:
         return f"HitachiDevice(id={self.dev_id}, name={self.name!r})"
 
 
-def _digest_auth_header(
-    username: str, password: str, method: str, uri: str, www_auth: str
-) -> str:
-    """Compute an Authorization: Digest header from a WWW-Authenticate challenge."""
-    realm  = re.search(r'realm="([^"]*)"',  www_auth)
-    nonce  = re.search(r'nonce="([^"]*)"',  www_auth)
-    opaque = re.search(r'opaque="([^"]*)"', www_auth)
-    qop    = re.search(r'qop="([^"]*)"',    www_auth)
-
-    realm_val  = realm.group(1)  if realm  else ""
-    nonce_val  = nonce.group(1)  if nonce  else ""
-    opaque_val = opaque.group(1) if opaque else None
-
-    ha1 = hashlib.md5(f"{username}:{realm_val}:{password}".encode()).hexdigest()
-    ha2 = hashlib.md5(f"{method}:{uri}".encode()).hexdigest()
-
-    if qop and "auth" in qop.group(1):
-        nc     = "00000001"
-        cnonce = hashlib.md5(os.urandom(8)).hexdigest()[:8]
-        resp   = hashlib.md5(f"{ha1}:{nonce_val}:{nc}:{cnonce}:auth:{ha2}".encode()).hexdigest()
-        header = (
-            f'Digest username="{username}", realm="{realm_val}", nonce="{nonce_val}", '
-            f'uri="{uri}", qop=auth, nc={nc}, cnonce="{cnonce}", response="{resp}"'
-        )
-    else:
-        resp   = hashlib.md5(f"{ha1}:{nonce_val}:{ha2}".encode()).hexdigest()
-        header = (
-            f'Digest username="{username}", realm="{realm_val}", nonce="{nonce_val}", '
-            f'uri="{uri}", response="{resp}"'
-        )
-
-    if opaque_val:
-        header += f', opaque="{opaque_val}"'
-    return header
-
 
 class HitachiClient:
     """Async HTTP client for the gateway's index.cgi endpoint."""
@@ -111,20 +72,6 @@ class HitachiClient:
     async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
-
-    def _make_auth_header(self, method: str, url: str, params: dict | None, www_auth: str) -> str:
-        """Return the correct Authorization header for a given WWW-Authenticate challenge."""
-        if "Digest" in www_auth:
-            from yarl import URL as YarlURL
-            if params:
-                uri = YarlURL(url).with_query(params).path_qs
-            else:
-                uri = urlparse(url).path
-            return _digest_auth_header(self._username, self._password, method, uri, www_auth)
-        # Basic
-        import base64
-        token = base64.b64encode(f"{self._username}:{self._password}".encode()).decode()
-        return f"Basic {token}"
 
     async def _ensure_logged_in(self) -> None:
         """POST login credentials to establish a session cookie."""
@@ -212,7 +159,7 @@ class HitachiClient:
             )
         return devices
 
-async def _fetch_device_names(self) -> dict[int, str]:
+    async def _fetch_device_names(self) -> dict[int, str]:
         """Return {dev_id: room_name} from the device list page (best-effort)."""
         params = {"mod": MOD_DEVICE_LIST, "act": ACT_DEVICE_LIST}
         try:
