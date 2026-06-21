@@ -126,56 +126,60 @@ class HitachiClient:
         token = base64.b64encode(f"{self._username}:{self._password}".encode()).decode()
         return f"Basic {token}"
 
-    async def _get(self, params: dict) -> str:
-        """GET with auth — waits for 401 challenge or handles form login."""
+    async def _ensure_logged_in(self) -> None:
+        """POST login credentials to establish a session cookie."""
         session = await self._get_session()
-        url = self._base
+        login_data = {
+            "mod": "0",
+            "act": "1",
+            "username": self._username or "",
+            "password": self._password or "",
+        }
+        async with session.post(
+            self._base,
+            data=login_data,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            html = await resp.text()
+            _LOGGER.debug("Login POST status=%d", resp.status)
+            if resp.status not in (200, 302):
+                raise HitachiGatewayError(f"Login failed with status {resp.status}")
+            # If still on login page, credentials were wrong
+            if "<title>Login</title>" in html:
+                raise HitachiGatewayError("Login rejected — check username and password")
 
-        async with session.get(url, params=params,
-                               timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            _LOGGER.debug("GET %s status=%d", params, resp.status)
-            if resp.status == 200:
-                html = await resp.text()
-                # Log snippet of first response to reveal login page structure
-                if not self._is_control_page(html):
-                    _LOGGER.error("LOGIN PAGE HTML (3000): %s", html[:3000])
-                return html
-            if resp.status == 401 and self._username:
-                www_auth = resp.headers.get("WWW-Authenticate", "")
-                _LOGGER.debug("GET 401, WWW-Authenticate: %s", www_auth)
-                auth_header = self._make_auth_header("GET", url, params, www_auth)
-                async with session.get(
-                    url, params=params,
-                    headers={"Authorization": auth_header},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp2:
-                    _LOGGER.debug("GET retry status: %d", resp2.status)
-                    resp2.raise_for_status()
-                    return await resp2.text()
-            _LOGGER.debug("GET unexpected status %d", resp.status)
-            resp.raise_for_status()
-            return await resp.text()
+    async def _get(self, params: dict, _retry: bool = True) -> str:
+        """GET, logging in first if we hit the login page."""
+        session = await self._get_session()
+        async with session.get(
+            self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            html = await resp.text()
+        if "<title>Login</title>" in html:
+            if not _retry or not self._username:
+                raise HitachiGatewayError("Gateway requires login — provide credentials")
+            _LOGGER.debug("Got login page, authenticating…")
+            await self._ensure_logged_in()
+            # Retry once after login
+            async with session.get(
+                self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp2:
+                return await resp2.text()
+        return html
 
     async def _post(self, data: dict) -> None:
-        """POST with auth — waits for 401 challenge to determine auth type."""
+        """POST device command, re-logging in if session expired."""
         session = await self._get_session()
-        url = self._base
-
-        async with session.post(url, data=data,
-                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status == 200:
-                return
-            if resp.status == 401 and self._username:
-                www_auth = resp.headers.get("WWW-Authenticate", "")
-                auth_header = self._make_auth_header("POST", url, None, www_auth)
-                async with session.post(
-                    url, data=data,
-                    headers={"Authorization": auth_header},
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp2:
-                    resp2.raise_for_status()
-                    return
-            resp.raise_for_status()
+        async with session.post(
+            self._base, data=data, timeout=aiohttp.ClientTimeout(total=10)
+        ) as resp:
+            html = await resp.text()
+        if "<title>Login</title>" in html and self._username:
+            await self._ensure_logged_in()
+            async with session.post(
+                self._base, data=data, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp2:
+                resp2.raise_for_status()
 
     # ------------------------------------------------------------------
     # Device discovery
@@ -184,7 +188,6 @@ class HitachiClient:
     async def discover_devices(self) -> list[HitachiDevice]:
         """Probe device IDs 1–16, returning those with a valid control page."""
         names = await self._fetch_device_names()
-        await self._fetch_login_js()
         devices: list[HitachiDevice] = []
 
         for dev_id in range(1, 17):
@@ -209,19 +212,7 @@ class HitachiClient:
             )
         return devices
 
-    async def _fetch_login_js(self) -> None:
-        """Fetch and log login.js to understand the login form submission."""
-        session = await self._get_session()
-        js_url = self._base.replace("/index.cgi", "/js/login.js")
-        try:
-            async with session.get(js_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status == 200:
-                    js = await resp.text()
-                    _LOGGER.error("LOGIN.JS: %s", js[:2000])
-        except Exception as exc:
-            _LOGGER.error("Could not fetch login.js: %s", exc)
-
-    async def _fetch_device_names(self) -> dict[int, str]:
+async def _fetch_device_names(self) -> dict[int, str]:
         """Return {dev_id: room_name} from the device list page (best-effort)."""
         params = {"mod": MOD_DEVICE_LIST, "act": ACT_DEVICE_LIST}
         try:
