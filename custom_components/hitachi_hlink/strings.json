@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hitachi HLink Aircloud Pro",
+        "description": "Enter the local IP address of your HC-IOTGW gateway.",
+        "data": {
+          "host": "Gateway IP address",
+          "port": "HTTPS port (default 443)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to the gateway. Verify the IP and that the device is reachable.",
+      "no_devices": "Connected but no AC units were found on the gateway."
+    },
+    "abort": {
+      "already_configured": "This gateway is already configured."
+    }
+  }
+}
