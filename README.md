@@ -33,7 +33,7 @@ Controls all Hitachi H-Link indoor units directly over your LAN — no cloud, no
 2. Add URL: `https://github.com/sofsaenz/hitachi_hlink_ha` — Category: **Integration**
 3. Install **Hitachi HLink Aircloud Pro** and restart Home Assistant
 4. **Settings → Devices & Services → Add Integration** → search **Hitachi HLink**
-5. Enter your gateway IP (default `10.24.10.70`, port `443`)
+5. Enter your gateway IP (default `192.168.xxx.xxx`, port `443`)
 
 ## Features
 
