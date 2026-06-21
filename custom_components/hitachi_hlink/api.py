@@ -66,7 +66,11 @@ class HitachiClient:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             connector = aiohttp.TCPConnector(ssl=_SSL_CTX)
-            self._session = aiohttp.ClientSession(connector=connector)
+            # unsafe=True: aiohttp rejects cookies from bare IP addresses by default
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                cookie_jar=aiohttp.CookieJar(unsafe=True),
+            )
         return self._session
 
     async def close(self) -> None:
