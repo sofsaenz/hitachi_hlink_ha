@@ -76,6 +76,8 @@ class HitachiClient:
     async def _ensure_logged_in(self) -> None:
         """POST login credentials to establish a session cookie."""
         session = await self._get_session()
+        # Post to the exact action URL from the form
+        login_url = self._base + "?mod=0&act=1"
         login_data = {
             "mod": "0",
             "act": "1",
@@ -83,15 +85,14 @@ class HitachiClient:
             "password": self._password or "",
         }
         async with session.post(
-            self._base,
+            login_url,
             data=login_data,
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             html = await resp.text()
-            _LOGGER.debug("Login POST status=%d", resp.status)
-            if resp.status not in (200, 302):
-                raise HitachiGatewayError(f"Login failed with status {resp.status}")
-            # If still on login page, credentials were wrong
+            cookies = {k: v.value for k, v in session.cookie_jar.filter_cookies(self._base).items()}
+            _LOGGER.error("Login POST status=%d cookies=%s html_title=%s",
+                          resp.status, cookies, html[:200])
             if "<title>Login</title>" in html:
                 raise HitachiGatewayError("Login rejected — check username and password")
 
@@ -102,16 +103,20 @@ class HitachiClient:
             self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             html = await resp.text()
-        if "<title>Login</title>" in html:
+        is_login = "<title>Login</title>" in html
+        _LOGGER.error("GET params=%s is_login=%s is_control=%s snippet=%s",
+                      params, is_login, self._is_control_page(html), html[:300])
+        if is_login:
             if not _retry or not self._username:
                 raise HitachiGatewayError("Gateway requires login — provide credentials")
-            _LOGGER.debug("Got login page, authenticating…")
             await self._ensure_logged_in()
-            # Retry once after login
             async with session.get(
                 self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp2:
-                return await resp2.text()
+                html2 = await resp2.text()
+                _LOGGER.error("GET retry is_control=%s snippet=%s",
+                              self._is_control_page(html2), html2[:300])
+                return html2
         return html
 
     async def _post(self, data: dict) -> None:
