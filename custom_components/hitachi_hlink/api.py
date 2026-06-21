@@ -7,7 +7,7 @@ import os
 import re
 import ssl
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse  # used in _make_auth_header POST path
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -112,62 +112,64 @@ class HitachiClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    def _make_auth_header(self, method: str, url: str, params: dict | None, www_auth: str) -> str:
+        """Return the correct Authorization header for a given WWW-Authenticate challenge."""
+        if "Digest" in www_auth:
+            from yarl import URL as YarlURL
+            if params:
+                uri = YarlURL(url).with_query(params).path_qs
+            else:
+                uri = urlparse(url).path
+            return _digest_auth_header(self._username, self._password, method, uri, www_auth)
+        # Basic
+        import base64
+        token = base64.b64encode(f"{self._username}:{self._password}".encode()).decode()
+        return f"Basic {token}"
+
     async def _get(self, params: dict) -> str:
-        """GET with automatic Basic→Digest auth fallback."""
+        """GET with auth — waits for 401 challenge to determine auth type."""
         session = await self._get_session()
         url = self._base
 
-        # First attempt — try Basic Auth (or no auth)
-        basic_auth = (
-            aiohttp.BasicAuth(self._username, self._password)
-            if self._username else None
-        )
-        async with session.get(url, params=params, auth=basic_auth,
+        # First attempt without auth to see what the server wants.
+        async with session.get(url, params=params,
                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 200:
+                return await resp.text()
             if resp.status == 401 and self._username:
                 www_auth = resp.headers.get("WWW-Authenticate", "")
-                if "Digest" in www_auth:
-                    # Build URI for digest (path + query as sent by aiohttp)
-                    from yarl import URL
-                    built = URL(url).with_query(params)
-                    uri = built.path_qs
-                    digest_header = _digest_auth_header(
-                        self._username, self._password, "GET", uri, www_auth
-                    )
-                    async with session.get(
-                        url, params=params,
-                        headers={"Authorization": digest_header},
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp2:
-                        resp2.raise_for_status()
-                        return await resp2.text()
+                _LOGGER.debug("GET 401, WWW-Authenticate: %s", www_auth)
+                auth_header = self._make_auth_header("GET", url, params, www_auth)
+                async with session.get(
+                    url, params=params,
+                    headers={"Authorization": auth_header},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp2:
+                    _LOGGER.debug("GET retry status: %d", resp2.status)
+                    resp2.raise_for_status()
+                    return await resp2.text()
             resp.raise_for_status()
             return await resp.text()
 
     async def _post(self, data: dict) -> None:
-        """POST with automatic Basic→Digest auth fallback."""
+        """POST with auth — waits for 401 challenge to determine auth type."""
         session = await self._get_session()
         url = self._base
-        basic_auth = (
-            aiohttp.BasicAuth(self._username, self._password)
-            if self._username else None
-        )
-        async with session.post(url, data=data, auth=basic_auth,
+
+        async with session.post(url, data=data,
                                 timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 200:
+                return
             if resp.status == 401 and self._username:
                 www_auth = resp.headers.get("WWW-Authenticate", "")
-                if "Digest" in www_auth:
-                    uri = urlparse(url).path
-                    digest_header = _digest_auth_header(
-                        self._username, self._password, "POST", uri, www_auth
-                    )
-                    async with session.post(
-                        url, data=data,
-                        headers={"Authorization": digest_header},
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp2:
-                        resp2.raise_for_status()
-                        return
+                auth_header = self._make_auth_header("POST", url, None, www_auth)
+                async with session.post(
+                    url, data=data,
+                    headers={"Authorization": auth_header},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp2:
+                    resp2.raise_for_status()
+                    return
             resp.raise_for_status()
 
     # ------------------------------------------------------------------
