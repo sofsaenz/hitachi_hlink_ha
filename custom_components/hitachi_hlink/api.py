@@ -138,7 +138,7 @@ class HitachiClient:
                 html = await resp.text()
                 # Log snippet of first response to reveal login page structure
                 if not self._is_control_page(html):
-                    _LOGGER.error("LOGIN PAGE HTML: %s", html[:1000])
+                    _LOGGER.error("LOGIN PAGE HTML (3000): %s", html[:3000])
                 return html
             if resp.status == 401 and self._username:
                 www_auth = resp.headers.get("WWW-Authenticate", "")
@@ -184,6 +184,7 @@ class HitachiClient:
     async def discover_devices(self) -> list[HitachiDevice]:
         """Probe device IDs 1–16, returning those with a valid control page."""
         names = await self._fetch_device_names()
+        await self._fetch_login_js()
         devices: list[HitachiDevice] = []
 
         for dev_id in range(1, 17):
@@ -207,6 +208,18 @@ class HitachiClient:
                 "No AC units found. Check the gateway IP, port, and credentials."
             )
         return devices
+
+    async def _fetch_login_js(self) -> None:
+        """Fetch and log login.js to understand the login form submission."""
+        session = await self._get_session()
+        js_url = self._base.replace("/index.cgi", "/js/login.js")
+        try:
+            async with session.get(js_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    js = await resp.text()
+                    _LOGGER.error("LOGIN.JS: %s", js[:2000])
+        except Exception as exc:
+            _LOGGER.error("Could not fetch login.js: %s", exc)
 
     async def _fetch_device_names(self) -> dict[int, str]:
         """Return {dev_id: room_name} from the device list page (best-effort)."""
