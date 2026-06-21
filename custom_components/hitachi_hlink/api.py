@@ -94,9 +94,7 @@ class HitachiClient:
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             html = await resp.text()
-            cookies = {k: v.value for k, v in session.cookie_jar.filter_cookies(self._base).items()}
-            _LOGGER.error("Login POST status=%d cookies=%s html_title=%s",
-                          resp.status, cookies, html[:200])
+            _LOGGER.debug("Login POST status=%d", resp.status)
             if "<title>Login</title>" in html:
                 raise HitachiGatewayError("Login rejected — check username and password")
 
@@ -107,20 +105,14 @@ class HitachiClient:
             self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             html = await resp.text()
-        is_login = "<title>Login</title>" in html
-        _LOGGER.error("GET params=%s is_login=%s is_control=%s snippet=%s",
-                      params, is_login, self._is_control_page(html), html[:300])
-        if is_login:
+        if "<title>Login</title>" in html:
             if not _retry or not self._username:
                 raise HitachiGatewayError("Gateway requires login — provide credentials")
             await self._ensure_logged_in()
             async with session.get(
                 self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp2:
-                html2 = await resp2.text()
-                _LOGGER.error("GET retry is_control=%s snippet=%s",
-                              self._is_control_page(html2), html2[:300])
-                return html2
+                return await resp2.text()
         return html
 
     async def _post(self, data: dict) -> None:
