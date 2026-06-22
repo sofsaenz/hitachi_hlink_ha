@@ -153,7 +153,7 @@ class HitachiClient:
                     continue
                 name = names.get(dev_id, f"AC Unit {dev_id}")
                 device = HitachiDevice(dev_id, name)
-                self._parse_control_page(html, device)
+                self._parse_control_page(html, device, _dump=True)
                 devices.append(device)
                 _LOGGER.debug("Found %r", device)
             except Exception as exc:
@@ -213,7 +213,9 @@ class HitachiClient:
         self._parse_control_page(html, device)
 
     @staticmethod
-    def _parse_control_page(html: str, device: HitachiDevice) -> None:
+    def _parse_control_page(html: str, device: HitachiDevice, _dump: bool = False) -> None:
+        if _dump:
+            _LOGGER.error("CONTROL PAGE HTML: %s", html)
         soup = BeautifulSoup(html, "html.parser")
 
         def selected_value(field_id: str) -> str | None:
