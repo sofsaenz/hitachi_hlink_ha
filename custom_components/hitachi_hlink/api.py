@@ -114,23 +114,23 @@ class HitachiClient:
                 return await resp2.text()
         return html
 
-    async def _post(self, url_params: dict, body: dict) -> None:
-        """POST device command.
+    async def _post(self, data: dict) -> None:
+        """POST device command with all fields in the body.
 
-        The gateway routes on mod/act/dev in the query string; control fields go in the body.
         Re-logs in if the session has expired.
         """
         session = await self._get_session()
         async with session.post(
-            self._base, params=url_params, data=body,
+            self._base, data=data,
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             html = await resp.text()
-        _LOGGER.debug("POST %s → is_login=%s", url_params, "<title>Login</title>" in html)
+        _LOGGER.error("POST act=%s is_login=%s snippet=%s",
+                      data.get("act"), "<title>Login</title>" in html, html[:300])
         if "<title>Login</title>" in html and self._username:
             await self._ensure_logged_in()
             async with session.post(
-                self._base, params=url_params, data=body,
+                self._base, data=data,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp2:
                 resp2.raise_for_status()
@@ -264,17 +264,20 @@ class HitachiClient:
         temperature: int | None = None,
         fan_speed: str | None = None,
     ) -> None:
-        # mod/act/dev go in the URL query string; control fields go in the POST body
-        url_params = {"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id}
-        body = {
+        temp_val = temperature if temperature is not None else device.temperature
+        payload = {
+            "mod":           MOD_AC,
+            "act":           ACT_SET_DEVICE,
+            "dev":           device.dev_id,
             "OnOff":         on_off         if on_off         is not None else device.on_off,
             "OperationMode": operation_mode if operation_mode is not None else device.operation_mode,
-            "Temp":          temperature    if temperature    is not None else device.temperature,
+            "Temp":          temp_val,
+            "Setpoint":      temp_val,   # gateway may use either name
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        _LOGGER.debug("set_state url=%s body=%s", url_params, body)
+        _LOGGER.error("set_state payload=%s", payload)
         try:
-            await self._post(url_params, body)
+            await self._post(payload)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
 
