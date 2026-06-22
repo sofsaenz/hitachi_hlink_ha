@@ -4,16 +4,24 @@ from __future__ import annotations
 import logging
 import ssl
 
+import json
+
 import aiohttp
 from bs4 import BeautifulSoup
 
 from .const import (
     ACT_DEVICE_LIST,
     ACT_GET_DEVICE,
+    ACT_POLL_DEVICE,
     ACT_SET_DEVICE,
     MOD_AC,
     MOD_DEVICE_LIST,
 )
+
+# act=35 returns JSON with text labels; map back to numeric codes
+_OPERATION_TO_ONOFF: dict[str, str] = {}   # anything != "OFF" → "1"
+_MODE_TEXT_TO_CODE = {"cool": "4", "heat": "2", "fan": "1", "dry": "64", "auto": "0"}
+_FAN_TEXT_TO_CODE  = {"weak wind": "0", "strong wind": "1", "sharp wind": "2"}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -201,57 +209,57 @@ class HitachiClient:
         return any(m in html for m in _CONTROL_PAGE_MARKERS)
 
     # ------------------------------------------------------------------
-    # State reading
+    # State reading  (act=35 returns JSON — select options are JS-populated)
     # ------------------------------------------------------------------
 
     async def fetch_state(self, device: HitachiDevice) -> None:
-        params = {"mod": MOD_AC, "act": ACT_GET_DEVICE, "dev": device.dev_id, "Temp": 0}
+        params = {"mod": MOD_AC, "act": ACT_POLL_DEVICE, "dev": device.dev_id}
         try:
             html = await self._get(params)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed reading device {device.dev_id}: {exc}") from exc
-        self._parse_control_page(html, device)
+        try:
+            data = json.loads(html)
+        except json.JSONDecodeError:
+            _LOGGER.debug("act=35 returned non-JSON for dev %s; keeping cached state", device.dev_id)
+            return
+        self._apply_json_state(data, device)
 
     @staticmethod
-    def _parse_control_page(html: str, device: HitachiDevice, _dump: bool = False) -> None:
-        if _dump:
-            _LOGGER.error("CONTROL PAGE HTML: %s", html)
-        soup = BeautifulSoup(html, "html.parser")
+    def _apply_json_state(data: dict, device: HitachiDevice) -> None:
+        """Update device from the act=35 JSON response."""
+        op = data.get("Operation", "").strip().upper()
+        device.on_off = "0" if op in ("OFF", "STOP", "") else "1"
 
-        def selected_value(field_id: str) -> str | None:
-            tag = soup.find(id=field_id)
-            if tag is None:
-                return None
-            opt = tag.find("option", selected=True)
-            return opt.get("value") if opt else tag.get("value")
+        mode_text = data.get("Mode", "").strip().lower()
+        device.operation_mode = _MODE_TEXT_TO_CODE.get(mode_text, device.operation_mode)
 
-        if (v := selected_value("OnOff")) is not None:
-            device.on_off = v
-        if (v := selected_value("OperationMode")) is not None:
-            device.operation_mode = v
-        if (v := selected_value("FanSpeed")) is not None:
-            device.fan_speed = v
+        fan_text = data.get("Real", "").strip().lower()
+        device.fan_speed = _FAN_TEXT_TO_CODE.get(fan_text, device.fan_speed)
 
-        for tag in soup.find_all("input", {"name": "Temp"}):
-            try:
-                device.temperature = int(tag.get("value", device.temperature))
-            except (ValueError, TypeError):
-                pass
+        tset = data.get("Tset", "")
+        try:
+            device.temperature = int(float(tset))
+        except (ValueError, TypeError):
+            pass
 
-        for candidate in ("RoomTemp", "roomTemp", "room_temp"):
-            tag = soup.find(id=candidate)
-            if tag:
-                try:
-                    device.room_temp = float(tag.get_text(strip=True))
-                except (ValueError, TypeError):
-                    pass
-                break
+        room = data.get("Ti", "") or data.get("Room", "")
+        try:
+            device.room_temp = float(room)
+        except (ValueError, TypeError):
+            device.room_temp = None
 
         _LOGGER.debug(
             "Device %s: on=%s mode=%s temp=%s fan=%s room=%s",
             device.dev_id, device.on_off, device.operation_mode,
             device.temperature, device.fan_speed, device.room_temp,
         )
+
+    @staticmethod
+    def _parse_control_page(html: str, device: HitachiDevice, _dump: bool = False) -> None:
+        """Used only during discovery to confirm a page is a device control page."""
+        if _dump:
+            _LOGGER.debug("Control page confirmed for dev %s", device.dev_id)
 
     # ------------------------------------------------------------------
     # State writing
@@ -273,11 +281,10 @@ class HitachiClient:
             "dev":           device.dev_id,
             "OnOff":         on_off         if on_off         is not None else device.on_off,
             "OperationMode": operation_mode if operation_mode is not None else device.operation_mode,
-            "Temp":          temp_val,
-            "Setpoint":      temp_val,   # gateway may use either name
+            "SetTemp":       f"{temp_val}.0",   # confirmed field name from form HTML; float string
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        _LOGGER.error("set_state payload=%s", payload)
+        _LOGGER.debug("set_state payload=%s", payload)
         try:
             await self._post(payload)
         except aiohttp.ClientError as exc:
