@@ -116,16 +116,25 @@ class HitachiClient:
         return html
 
     async def _post(self, data: dict) -> None:
-        """POST device command, re-logging in if session expired."""
+        """POST device command, re-logging in if session expired.
+
+        The gateway routes on mod/act in the query string, so we put them
+        there as well as in the form body (same pattern as the login form).
+        """
         session = await self._get_session()
+        params = {"mod": data.get("mod", ""), "act": data.get("act", "")}
         async with session.post(
-            self._base, data=data, timeout=aiohttp.ClientTimeout(total=10)
+            self._base, params=params, data=data, timeout=aiohttp.ClientTimeout(total=10)
         ) as resp:
             html = await resp.text()
+        _LOGGER.debug("POST mod=%s act=%s status=%s is_login=%s",
+                      params["mod"], params["act"],
+                      resp.status if hasattr(resp, "status") else "?",
+                      "<title>Login</title>" in html)
         if "<title>Login</title>" in html and self._username:
             await self._ensure_logged_in()
             async with session.post(
-                self._base, data=data, timeout=aiohttp.ClientTimeout(total=10)
+                self._base, params=params, data=data, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp2:
                 resp2.raise_for_status()
 
@@ -267,6 +276,7 @@ class HitachiClient:
             "Temp":          temperature    if temperature    is not None else device.temperature,
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
+        _LOGGER.error("set_state payload: %s", payload)
         try:
             await self._post(payload)
         except aiohttp.ClientError as exc:
