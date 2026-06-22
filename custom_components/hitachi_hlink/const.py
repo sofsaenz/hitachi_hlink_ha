@@ -6,8 +6,9 @@ DEFAULT_SCAN_INTERVAL = 30  # seconds
 MOD_AC = 3
 MOD_DEVICE_LIST = 1
 ACT_DEVICE_LIST = 11   # GET  mod=1&act=11          → device list page (names + ids)
-ACT_GET_DEVICE  = 31   # GET mod=3&act=31&dev=N              → read device control page
-ACT_SET_DEVICE  = 31   # GET mod=3&act=31&dev=N&OnOff=...   → same URL, gateway saves on param presence
+ACT_GET_DEVICE  = 31   # GET  mod=3&act=31&dev=N                    → read device control page
+ACT_SET_DEVICE  = 33   # POST mod=3&act=33&dev=N + body fields     → save settings (dev must be in URL)
+ACT_POLL_DEVICE = 35   # XHR  mod=3&act=35&dev=N                   → lightweight status poll
 
 # OnOff field values
 ONOFF_ON  = "1"
