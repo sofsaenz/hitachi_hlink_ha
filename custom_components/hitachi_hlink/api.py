@@ -204,7 +204,7 @@ class HitachiClient:
                         names[int(dev_id)] = text or f"AC Unit {dev_id}"
                         break
 
-        _LOGGER.error("Device name map from list page: %s", names)
+        _LOGGER.debug("Device name map from list page: %s", names)
         return names
 
     @staticmethod
