@@ -147,27 +147,28 @@ class HitachiClient:
     # ------------------------------------------------------------------
 
     async def discover_devices(self) -> list[HitachiDevice]:
-        """Probe device IDs 1–16, returning those with a valid control page."""
+        """Discover devices using the device list page, falling back to probing 1–32."""
         names = await self._fetch_device_names()
-        devices: list[HitachiDevice] = []
 
-        for dev_id in range(1, 17):
+        # Prefer the IDs we found on the device list page; fall back to full probe
+        dev_ids = sorted(names.keys()) if names else list(range(1, 33))
+        _LOGGER.debug("Probing dev IDs: %s", dev_ids)
+
+        devices: list[HitachiDevice] = []
+        for dev_id in dev_ids:
             params = {"mod": MOD_AC, "act": ACT_GET_DEVICE, "dev": dev_id, "Temp": 0}
             try:
                 html = await self._get(params)
                 if not self._is_control_page(html):
-                    _LOGGER.error("dev=%d: not a control page — title=%s snippet=%s",
-                                  dev_id,
-                                  (BeautifulSoup(html, "html.parser").title or {}).get_text(),
-                                  html[200:500])
+                    _LOGGER.debug("dev=%d: not a control page, skipping", dev_id)
                     continue
                 name = names.get(dev_id, f"AC Unit {dev_id}")
                 device = HitachiDevice(dev_id, name)
                 self._parse_control_page(html, device)
                 devices.append(device)
-                _LOGGER.error("dev=%d FOUND as %r", dev_id, name)
+                _LOGGER.debug("Found %r", device)
             except Exception as exc:
-                _LOGGER.error("dev=%d error: %s", dev_id, exc)
+                _LOGGER.debug("dev=%d error: %s", dev_id, exc)
                 continue
 
         if not devices:
@@ -203,7 +204,7 @@ class HitachiClient:
                         names[int(dev_id)] = text or f"AC Unit {dev_id}"
                         break
 
-        _LOGGER.debug("Device name map from list page: %s", names)
+        _LOGGER.error("Device name map from list page: %s", names)
         return names
 
     @staticmethod
