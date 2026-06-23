@@ -133,8 +133,7 @@ class HitachiClient:
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             html = await resp.text()
-        _LOGGER.error("POST act=%s is_login=%s snippet=%s",
-                      data.get("act"), "<title>Login</title>" in html, html[:300])
+        _LOGGER.debug("POST act=%s is_login=%s", data.get("act"), "<title>Login</title>" in html)
         if "<title>Login</title>" in html and self._username:
             await self._ensure_logged_in()
             async with session.post(
