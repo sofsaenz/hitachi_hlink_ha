@@ -156,15 +156,18 @@ class HitachiClient:
             try:
                 html = await self._get(params)
                 if not self._is_control_page(html):
-                    _LOGGER.debug("dev=%d: not a control page, skipping", dev_id)
+                    _LOGGER.error("dev=%d: not a control page — title=%s snippet=%s",
+                                  dev_id,
+                                  (BeautifulSoup(html, "html.parser").title or {}).get_text(),
+                                  html[200:500])
                     continue
                 name = names.get(dev_id, f"AC Unit {dev_id}")
                 device = HitachiDevice(dev_id, name)
-                self._parse_control_page(html, device, _dump=True)
+                self._parse_control_page(html, device)
                 devices.append(device)
-                _LOGGER.debug("Found %r", device)
+                _LOGGER.error("dev=%d FOUND as %r", dev_id, name)
             except Exception as exc:
-                _LOGGER.debug("dev=%d error: %s", dev_id, exc)
+                _LOGGER.error("dev=%d error: %s", dev_id, exc)
                 continue
 
         if not devices:
