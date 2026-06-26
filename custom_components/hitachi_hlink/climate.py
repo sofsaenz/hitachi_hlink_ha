@@ -87,7 +87,10 @@ class HitachiClimate(CoordinatorEntity, ClimateEntity):
     ]
     _attr_fan_modes = [FAN_LOW, FAN_MEDIUM, FAN_HIGH]
     _attr_supported_features = (
-        ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE
+        ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.FAN_MODE
+        | ClimateEntityFeature.TURN_ON
+        | ClimateEntityFeature.TURN_OFF
     )
 
     def __init__(

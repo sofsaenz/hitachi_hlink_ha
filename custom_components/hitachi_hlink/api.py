@@ -138,20 +138,18 @@ class HitachiClient:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 html = await resp.text()
-            _LOGGER.error("POST act=%s is_login=%s snippet=%s",
-                          data.get("act"), "<title>Login</title>" in html, html[:200])
+            _LOGGER.debug("POST act=%s is_login=%s", data.get("act"), "<title>Login</title>" in html)
             if "<title>Login</title>" in html:
                 raise _SessionExpired
         except (aiohttp.ClientError, TimeoutError, _SessionExpired) as exc:
-            _LOGGER.error("POST failed (%s) — re-logging in", exc)
+            _LOGGER.debug("POST failed (%s) — re-logging in", exc)
             await self._ensure_logged_in()
             async with session.post(
                 self._base, data=data,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp2:
                 html2 = await resp2.text()
-                _LOGGER.error("POST retry is_login=%s snippet=%s",
-                              "<title>Login</title>" in html2, html2[:200])
+                _LOGGER.debug("POST retry is_login=%s", "<title>Login</title>" in html2)
 
     # ------------------------------------------------------------------
     # Device discovery
@@ -263,7 +261,7 @@ class HitachiClient:
         except (ValueError, TypeError):
             device.room_temp = None
 
-        _LOGGER.error(
+        _LOGGER.debug(
             "act=35 dev=%s: on=%s mode=%s temp=%s fan=%s room=%s",
             device.dev_id, device.on_off, device.operation_mode,
             device.temperature, device.fan_speed, device.room_temp,
@@ -298,7 +296,7 @@ class HitachiClient:
             "SetTemp":       f"{temp_val}.0",   # confirmed field name from form HTML; float string
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        _LOGGER.error("set_state payload=%s", payload)
+        _LOGGER.debug("set_state payload=%s", payload)
         try:
             await self._post(payload)
         except aiohttp.ClientError as exc:
