@@ -1,10 +1,10 @@
 """Local HTTP client for Hitachi HC-IOTGW (Aircloud Pro) gateway — index.cgi interface."""
 from __future__ import annotations
 
+import json
 import logging
 import ssl
-
-import json
+import time
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -68,10 +68,12 @@ class HitachiClient:
         username: str | None = None,
         password: str | None = None,
     ) -> None:
-        self._base     = f"https://{host}:{port}/index.cgi"
-        self._username = username
-        self._password = password
+        self._base      = f"https://{host}:{port}/index.cgi"
+        self._username  = username
+        self._password  = password
         self._session: aiohttp.ClientSession | None = None
+        self._last_login: float = 0.0
+        self._LOGIN_TTL = 20 * 60  # re-login every 20 minutes
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -107,10 +109,14 @@ class HitachiClient:
             _LOGGER.debug("Login POST status=%d", resp.status)
             if "<title>Login</title>" in html:
                 raise HitachiGatewayError("Login rejected — check username and password")
+            self._last_login = time.monotonic()
 
     async def _get(self, params: dict, _retry: bool = True) -> str:
         """GET, re-logging in on expired session or timeout."""
         session = await self._get_session()
+        if self._username and (time.monotonic() - self._last_login) > self._LOGIN_TTL:
+            _LOGGER.debug("Proactive re-login (session TTL exceeded)")
+            await self._ensure_logged_in()
         try:
             async with session.get(
                 self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
@@ -132,6 +138,9 @@ class HitachiClient:
     async def _post(self, data: dict) -> None:
         """POST device command, re-logging in on expired session or timeout."""
         session = await self._get_session()
+        if self._username and (time.monotonic() - self._last_login) > self._LOGIN_TTL:
+            _LOGGER.debug("Proactive re-login before POST (session TTL exceeded)")
+            await self._ensure_logged_in()
         try:
             async with session.post(
                 self._base, data=data,
