@@ -263,8 +263,8 @@ class HitachiClient:
         except (ValueError, TypeError):
             device.room_temp = None
 
-        _LOGGER.debug(
-            "Device %s: on=%s mode=%s temp=%s fan=%s room=%s",
+        _LOGGER.error(
+            "act=35 dev=%s: on=%s mode=%s temp=%s fan=%s room=%s",
             device.dev_id, device.on_off, device.operation_mode,
             device.temperature, device.fan_speed, device.room_temp,
         )
@@ -298,7 +298,7 @@ class HitachiClient:
             "SetTemp":       f"{temp_val}.0",   # confirmed field name from form HTML; float string
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        _LOGGER.debug("set_state payload=%s", payload)
+        _LOGGER.error("set_state payload=%s", payload)
         try:
             await self._post(payload)
         except aiohttp.ClientError as exc:
