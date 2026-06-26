@@ -138,16 +138,20 @@ class HitachiClient:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 html = await resp.text()
+            _LOGGER.error("POST act=%s is_login=%s snippet=%s",
+                          data.get("act"), "<title>Login</title>" in html, html[:200])
             if "<title>Login</title>" in html:
                 raise _SessionExpired
-        except (aiohttp.ClientError, TimeoutError, _SessionExpired):
-            _LOGGER.debug("POST failed or session expired — re-logging in")
+        except (aiohttp.ClientError, TimeoutError, _SessionExpired) as exc:
+            _LOGGER.error("POST failed (%s) — re-logging in", exc)
             await self._ensure_logged_in()
             async with session.post(
                 self._base, data=data,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp2:
-                resp2.raise_for_status()
+                html2 = await resp2.text()
+                _LOGGER.error("POST retry is_login=%s snippet=%s",
+                              "<title>Login</title>" in html2, html2[:200])
 
     # ------------------------------------------------------------------
     # Device discovery
