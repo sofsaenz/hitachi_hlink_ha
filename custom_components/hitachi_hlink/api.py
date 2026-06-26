@@ -25,6 +25,9 @@ _FAN_TEXT_TO_CODE  = {"weak wind": "0", "strong wind": "1", "sharp wind": "2"}
 
 _LOGGER = logging.getLogger(__name__)
 
+class _SessionExpired(Exception):
+    """Raised internally when the gateway returns the login page."""
+
 # Gateway uses a self-signed TLS cert — skip verification.
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
@@ -106,15 +109,19 @@ class HitachiClient:
                 raise HitachiGatewayError("Login rejected — check username and password")
 
     async def _get(self, params: dict, _retry: bool = True) -> str:
-        """GET, logging in first if we hit the login page."""
+        """GET, re-logging in on expired session or timeout."""
         session = await self._get_session()
-        async with session.get(
-            self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
-        ) as resp:
-            html = await resp.text()
-        if "<title>Login</title>" in html:
+        try:
+            async with session.get(
+                self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                html = await resp.text()
+            if "<title>Login</title>" in html:
+                raise _SessionExpired
+        except (aiohttp.ClientError, TimeoutError, _SessionExpired):
             if not _retry or not self._username:
                 raise HitachiGatewayError("Gateway requires login — provide credentials")
+            _LOGGER.debug("GET session expired or timed out — re-logging in")
             await self._ensure_logged_in()
             async with session.get(
                 self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
@@ -123,18 +130,18 @@ class HitachiClient:
         return html
 
     async def _post(self, data: dict) -> None:
-        """POST device command with all fields in the body.
-
-        Re-logs in if the session has expired.
-        """
+        """POST device command, re-logging in on expired session or timeout."""
         session = await self._get_session()
-        async with session.post(
-            self._base, data=data,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            html = await resp.text()
-        _LOGGER.debug("POST act=%s is_login=%s", data.get("act"), "<title>Login</title>" in html)
-        if "<title>Login</title>" in html and self._username:
+        try:
+            async with session.post(
+                self._base, data=data,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                html = await resp.text()
+            if "<title>Login</title>" in html:
+                raise _SessionExpired
+        except (aiohttp.ClientError, TimeoutError, _SessionExpired):
+            _LOGGER.debug("POST failed or session expired — re-logging in")
             await self._ensure_logged_in()
             async with session.post(
                 self._base, data=data,
