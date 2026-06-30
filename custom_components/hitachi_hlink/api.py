@@ -135,15 +135,16 @@ class HitachiClient:
                 return await resp2.text()
         return html
 
-    async def _post(self, data: dict) -> None:
+    async def _post(self, data: dict, referer: str | None = None) -> None:
         """POST device command, re-logging in on expired session or timeout."""
         session = await self._get_session()
         if self._username and (time.monotonic() - self._last_login) > self._LOGIN_TTL:
             _LOGGER.debug("Proactive re-login before POST (session TTL exceeded)")
             await self._ensure_logged_in()
+        headers = {"Referer": referer} if referer else {}
         try:
             async with session.post(
-                self._base, data=data,
+                self._base, data=data, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 html = await resp.text()
@@ -154,7 +155,7 @@ class HitachiClient:
             _LOGGER.debug("POST failed (%s) — re-logging in", exc)
             await self._ensure_logged_in()
             async with session.post(
-                self._base, data=data,
+                self._base, data=data, headers=headers,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp2:
                 html2 = await resp2.text()
@@ -306,8 +307,11 @@ class HitachiClient:
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
         _LOGGER.error("set_state payload=%s", payload)
+        referer = (
+            f"{self._base}?mod={MOD_AC}&act={ACT_GET_DEVICE}&dev={device.dev_id}"
+        )
         try:
-            await self._post(payload)
+            await self._post(payload, referer=referer)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
 
