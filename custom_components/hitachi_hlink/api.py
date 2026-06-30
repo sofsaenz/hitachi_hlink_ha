@@ -147,7 +147,7 @@ class HitachiClient:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 html = await resp.text()
-            _LOGGER.debug("POST act=%s is_login=%s", data.get("act"), "<title>Login</title>" in html)
+            _LOGGER.error("POST act=%s is_login=%s snippet=%s", data.get("act"), "<title>Login</title>" in html, html[:300])
             if "<title>Login</title>" in html:
                 raise _SessionExpired
         except (aiohttp.ClientError, TimeoutError, _SessionExpired) as exc:
@@ -305,7 +305,7 @@ class HitachiClient:
             "SetTemp":       f"{temp_val}.0",   # confirmed field name from form HTML; float string
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        _LOGGER.debug("set_state payload=%s", payload)
+        _LOGGER.error("set_state payload=%s", payload)
         try:
             await self._post(payload)
         except aiohttp.ClientError as exc:
