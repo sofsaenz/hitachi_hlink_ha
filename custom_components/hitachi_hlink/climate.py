@@ -128,6 +128,7 @@ class HitachiClimate(CoordinatorEntity, ClimateEntity):
         return _GW_TO_HA_FAN.get(self._dev.fan_speed, FAN_LOW)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        _LOGGER.error("async_set_hvac_mode called: dev=%s mode=%s", self._dev.dev_id, hvac_mode)
         if hvac_mode == HVACMode.OFF:
             await self._client.set_state(self._dev, on_off=ONOFF_OFF)
         else:
@@ -151,6 +152,7 @@ class HitachiClimate(CoordinatorEntity, ClimateEntity):
         await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self) -> None:
+        _LOGGER.error("async_turn_on called: dev=%s", self._dev.dev_id)
         await self._client.set_state(self._dev, on_off=ONOFF_ON)
         await self.coordinator.async_request_refresh()
 
