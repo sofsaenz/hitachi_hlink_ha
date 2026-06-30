@@ -141,7 +141,11 @@ class HitachiClient:
         if self._username and (time.monotonic() - self._last_login) > self._LOGIN_TTL:
             _LOGGER.debug("Proactive re-login before POST (session TTL exceeded)")
             await self._ensure_logged_in()
-        headers = {"Referer": referer} if referer else {}
+        origin = f"https://{self._base.split('/')[2]}"  # https://host:port
+        headers = {
+            "Origin":  origin,
+            "Referer": referer or origin,
+        }
         try:
             async with session.post(
                 url, data=data, headers=headers,
@@ -159,7 +163,7 @@ class HitachiClient:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp2:
                 html2 = await resp2.text()
-                _LOGGER.debug("POST retry is_login=%s", "<title>Login</title>" in html2)
+                _LOGGER.error("POST retry is_login=%s snippet=%s", "<title>Login</title>" in html2, html2[:200])
 
     # ------------------------------------------------------------------
     # Device discovery
@@ -303,14 +307,15 @@ class HitachiClient:
             "SetTemp":       f"{temp_val}.0",
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        # Browser sends mod/act/dev as URL query params; only control fields in POST body
+        # Browser GETs act=33 page, then POSTs to the same URL with only control fields in body
         post_url = (
             f"{self._base}?mod={MOD_AC}&act={ACT_SET_DEVICE}&dev={device.dev_id}"
         )
-        referer = post_url
         _LOGGER.error("set_state url=%s body=%s", post_url, payload)
         try:
-            await self._post(post_url, payload, referer=referer)
+            # Visit the control page first so the gateway establishes device session state
+            await self._get({"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id})
+            await self._post(post_url, payload, referer=post_url)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
 
