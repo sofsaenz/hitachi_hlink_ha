@@ -307,10 +307,14 @@ class HitachiClient:
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
         _LOGGER.error("set_state payload=%s", payload)
+        # GET the control page first — the gateway needs this to establish device context
+        # before it will relay the POST command to the H-Link bus
+        control_params = {"mod": MOD_AC, "act": ACT_GET_DEVICE, "dev": device.dev_id}
         referer = (
             f"{self._base}?mod={MOD_AC}&act={ACT_GET_DEVICE}&dev={device.dev_id}"
         )
         try:
+            await self._get(control_params)
             await self._post(payload, referer=referer)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
