@@ -7,7 +7,6 @@ import ssl
 import time
 
 import aiohttp
-from yarl import URL
 from bs4 import BeautifulSoup
 
 from .const import (
@@ -139,48 +138,30 @@ class HitachiClient:
                 return await resp2.text()
         return html
 
-    async def _post(self, url: str, data: dict, referer: str | None = None) -> None:
-        """POST device command to url, re-logging in on expired session or timeout."""
+    async def _post(self, url: str, data: dict) -> None:
+        """POST device command, re-logging in on expired session or timeout."""
         session = await self._get_session()
         if self._username and (time.monotonic() - self._last_login) > self._LOGIN_TTL:
             _LOGGER.debug("Proactive re-login before POST (session TTL exceeded)")
             await self._ensure_logged_in()
-        origin = f"https://{self._base.split('/')[2]}"  # https://host:port
-        # Explicitly pass the session cookie — aiohttp CookieJar may not match on URL-with-params
-        jar_cookies = session.cookie_jar.filter_cookies(URL(url))
-        cookie_str = "; ".join(f"{k}={v.value}" for k, v in jar_cookies.items())
-        headers = {
-            "Origin":  origin,
-            "Referer": referer or origin,
-        }
-        if cookie_str:
-            headers["Cookie"] = cookie_str
-        _LOGGER.error("POST cookie=%s", cookie_str or "NONE")
         try:
             async with session.post(
-                url, data=data, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=15),
+                url, data=data, timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 html = await resp.text()
-            _LOGGER.error("POST url=%s is_login=%s snippet=%s", url, "<title>Login</title>" in html, html[:200])
+            _LOGGER.error("POST is_login=%s title=%s", "<title>Login</title>" in html,
+                          html[html.find("<title>"):html.find("</title>")+8])
             if "<title>Login</title>" in html:
                 raise _SessionExpired
         except (aiohttp.ClientError, TimeoutError, _SessionExpired) as exc:
             _LOGGER.debug("POST failed (%s) — re-logging in", exc)
             await self._ensure_logged_in()
-            # Re-read cookie after fresh login
-            jar_cookies2 = session.cookie_jar.filter_cookies(URL(url))
-            cookie_str2 = "; ".join(f"{k}={v.value}" for k, v in jar_cookies2.items())
-            headers2 = dict(headers)
-            if cookie_str2:
-                headers2["Cookie"] = cookie_str2
-            _LOGGER.error("POST retry cookie=%s", cookie_str2 or "NONE")
             async with session.post(
-                url, data=data, headers=headers2,
-                timeout=aiohttp.ClientTimeout(total=15),
+                url, data=data, timeout=aiohttp.ClientTimeout(total=15),
             ) as resp2:
                 html2 = await resp2.text()
-                _LOGGER.error("POST retry is_login=%s snippet=%s", "<title>Login</title>" in html2, html2[:200])
+                _LOGGER.error("POST retry is_login=%s title=%s", "<title>Login</title>" in html2,
+                              html2[html2.find("<title>"):html2.find("</title>")+8])
 
     # ------------------------------------------------------------------
     # Device discovery
@@ -324,22 +305,11 @@ class HitachiClient:
             "SetTemp":       f"{temp_val}.0",
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        # Browser GETs act=33 page, then POSTs to the same URL with only control fields in body
-        post_url = (
-            f"{self._base}?mod={MOD_AC}&act={ACT_SET_DEVICE}&dev={device.dev_id}"
-        )
-        _LOGGER.error("set_state url=%s body=%s", post_url, payload)
-        device_list_url = f"{self._base}?mod={MOD_DEVICE_LIST}&act={ACT_DEVICE_LIST}"
+        # Post all fields in body — gateway returns Device List as the success confirmation
+        full_payload = {"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id, **payload}
+        _LOGGER.error("set_state payload=%s", full_payload)
         try:
-            # Mimic browser navigation: Device List → Device Control → POST
-            # Gateway uses Referer to establish device session context
-            await self._get({"mod": MOD_DEVICE_LIST, "act": ACT_DEVICE_LIST})
-            control_html = await self._get(
-                {"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id},
-                referer=device_list_url,
-            )
-            _LOGGER.error("act=33 GET title=%s", control_html[control_html.find("<title>"):control_html.find("</title>")+8])
-            await self._post(post_url, payload, referer=post_url)
+            await self._post(self._base, full_payload)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
 
