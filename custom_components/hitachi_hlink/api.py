@@ -7,6 +7,7 @@ import ssl
 import time
 
 import aiohttp
+from yarl import URL
 from bs4 import BeautifulSoup
 
 from .const import (
@@ -142,10 +143,16 @@ class HitachiClient:
             _LOGGER.debug("Proactive re-login before POST (session TTL exceeded)")
             await self._ensure_logged_in()
         origin = f"https://{self._base.split('/')[2]}"  # https://host:port
+        # Explicitly pass the session cookie — aiohttp CookieJar may not match on URL-with-params
+        jar_cookies = session.cookie_jar.filter_cookies(URL(url))
+        cookie_str = "; ".join(f"{k}={v.value}" for k, v in jar_cookies.items())
         headers = {
             "Origin":  origin,
             "Referer": referer or origin,
         }
+        if cookie_str:
+            headers["Cookie"] = cookie_str
+        _LOGGER.error("POST cookie=%s", cookie_str or "NONE")
         try:
             async with session.post(
                 url, data=data, headers=headers,
