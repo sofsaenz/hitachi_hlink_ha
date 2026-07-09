@@ -112,15 +112,17 @@ class HitachiClient:
                 raise HitachiGatewayError("Login rejected — check username and password")
             self._last_login = time.monotonic()
 
-    async def _get(self, params: dict, _retry: bool = True) -> str:
+    async def _get(self, params: dict, _retry: bool = True, referer: str | None = None) -> str:
         """GET, re-logging in on expired session or timeout."""
         session = await self._get_session()
         if self._username and (time.monotonic() - self._last_login) > self._LOGIN_TTL:
             _LOGGER.debug("Proactive re-login (session TTL exceeded)")
             await self._ensure_logged_in()
+        extra_headers = {"Referer": referer} if referer else {}
         try:
             async with session.get(
-                self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
+                self._base, params=params, headers=extra_headers,
+                timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 html = await resp.text()
             if "<title>Login</title>" in html:
@@ -131,7 +133,8 @@ class HitachiClient:
             _LOGGER.debug("GET session expired or timed out — re-logging in")
             await self._ensure_logged_in()
             async with session.get(
-                self._base, params=params, timeout=aiohttp.ClientTimeout(total=10)
+                self._base, params=params, headers=extra_headers,
+                timeout=aiohttp.ClientTimeout(total=10)
             ) as resp2:
                 return await resp2.text()
         return html
@@ -326,10 +329,16 @@ class HitachiClient:
             f"{self._base}?mod={MOD_AC}&act={ACT_SET_DEVICE}&dev={device.dev_id}"
         )
         _LOGGER.error("set_state url=%s body=%s", post_url, payload)
+        device_list_url = f"{self._base}?mod={MOD_DEVICE_LIST}&act={ACT_DEVICE_LIST}"
         try:
-            # Visit the control page first so the gateway establishes device session state
-            control_html = await self._get({"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id})
-            _LOGGER.error("act=33 GET snippet=%s", control_html[:500])
+            # Mimic browser navigation: Device List → Device Control → POST
+            # Gateway uses Referer to establish device session context
+            await self._get({"mod": MOD_DEVICE_LIST, "act": ACT_DEVICE_LIST})
+            control_html = await self._get(
+                {"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id},
+                referer=device_list_url,
+            )
+            _LOGGER.error("act=33 GET title=%s", control_html[control_html.find("<title>"):control_html.find("</title>")+8])
             await self._post(post_url, payload, referer=post_url)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
