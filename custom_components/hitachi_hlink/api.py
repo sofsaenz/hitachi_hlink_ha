@@ -94,8 +94,9 @@ class HitachiClient:
         session = await self._get_session()
         # Post to the exact action URL from the form
         login_url = self._base + "?mod=0&act=1"
-        # Form only contains username+password — mod/act go in the URL only
         login_data = {
+            "mod": "0",
+            "act": "1",
             "username": self._username or "",
             "password": self._password or "",
         }
@@ -304,12 +305,10 @@ class HitachiClient:
             "SetTemp":       f"{temp_val}.0",
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        # mod/act/dev in URL (as browser does), control fields in body
-        # Login fix: clean session from username/password-only login should now allow this
-        post_url = f"{self._base}?mod={MOD_AC}&act={ACT_SET_DEVICE}&dev={device.dev_id}"
-        _LOGGER.error("set_state url=%s body=%s", post_url, payload)
+        full_payload = {"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id, **payload}
+        _LOGGER.error("set_state payload=%s", full_payload)
         try:
-            await self._post(post_url, payload)
+            await self._post(self._base, full_payload)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
 
