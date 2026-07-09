@@ -165,8 +165,15 @@ class HitachiClient:
         except (aiohttp.ClientError, TimeoutError, _SessionExpired) as exc:
             _LOGGER.debug("POST failed (%s) — re-logging in", exc)
             await self._ensure_logged_in()
+            # Re-read cookie after fresh login
+            jar_cookies2 = session.cookie_jar.filter_cookies(URL(url))
+            cookie_str2 = "; ".join(f"{k}={v.value}" for k, v in jar_cookies2.items())
+            headers2 = dict(headers)
+            if cookie_str2:
+                headers2["Cookie"] = cookie_str2
+            _LOGGER.error("POST retry cookie=%s", cookie_str2 or "NONE")
             async with session.post(
-                url, data=data, headers=headers,
+                url, data=data, headers=headers2,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp2:
                 html2 = await resp2.text()
@@ -321,7 +328,8 @@ class HitachiClient:
         _LOGGER.error("set_state url=%s body=%s", post_url, payload)
         try:
             # Visit the control page first so the gateway establishes device session state
-            await self._get({"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id})
+            control_html = await self._get({"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id})
+            _LOGGER.error("act=33 GET snippet=%s", control_html[:500])
             await self._post(post_url, payload, referer=post_url)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
