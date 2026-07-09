@@ -138,30 +138,55 @@ class HitachiClient:
                 return await resp2.text()
         return html
 
-    async def _post(self, url: str, data: dict) -> None:
-        """POST device command, re-logging in on expired session or timeout."""
+    async def _post_command(self, dev_id: int, control_data: dict) -> None:
+        """Send a device command, mirroring the browser flow: GET act=33 then POST to same URL."""
         session = await self._get_session()
         if self._username and (time.monotonic() - self._last_login) > self._LOGIN_TTL:
             _LOGGER.debug("Proactive re-login before POST (session TTL exceeded)")
             await self._ensure_logged_in()
-        try:
-            async with session.post(
-                url, data=data, timeout=aiohttp.ClientTimeout(total=15),
+
+        control_url = f"{self._base}?mod={MOD_AC}&act={ACT_SET_DEVICE}&dev={dev_id}"
+
+        # e.g. "https://10.24.10.70"
+        origin = self._base.rsplit("/index.cgi", 1)[0]
+
+        async def _do_post() -> str:
+            # Step 1: GET the control form page (gateway requires this to establish session state)
+            async with session.get(
+                control_url, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
-                html = await resp.text()
-            _LOGGER.error("POST is_login=%s title=%s", "<title>Login</title>" in html,
-                          html[html.find("<title>"):html.find("</title>")+8])
-            if "<title>Login</title>" in html:
-                raise _SessionExpired
-        except (aiohttp.ClientError, TimeoutError, _SessionExpired) as exc:
-            _LOGGER.debug("POST failed (%s) — re-logging in", exc)
-            await self._ensure_logged_in()
+                get_html = await resp.text()
+            if "<title>Login</title>" in get_html:
+                raise _SessionExpired("GET act=33 returned Login")
+            _LOGGER.debug("GET act=33 dev=%s OK", dev_id)
+
+            # Step 2: POST only the control fields to the same URL, with Referer matching browser
+            headers = {
+                "Origin": origin,
+                "Referer": control_url,
+            }
             async with session.post(
-                url, data=data, timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp2:
-                html2 = await resp2.text()
-                _LOGGER.error("POST retry is_login=%s title=%s", "<title>Login</title>" in html2,
-                              html2[html2.find("<title>"):html2.find("</title>")+8])
+                control_url,
+                data=control_data,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                post_html = await resp.text()
+
+            title_start = post_html.find("<title>")
+            title_end = post_html.find("</title>")
+            title = post_html[title_start:title_end + 8] if title_start != -1 else "?"
+            _LOGGER.debug("POST act=33 dev=%s → %s", dev_id, title)
+            if "<title>Login</title>" in post_html:
+                raise _SessionExpired("POST act=33 returned Login")
+            return post_html
+
+        try:
+            await _do_post()
+        except _SessionExpired:
+            _LOGGER.debug("Session expired — re-logging in and retrying")
+            await self._ensure_logged_in()
+            await _do_post()
 
     # ------------------------------------------------------------------
     # Device discovery
@@ -299,16 +324,16 @@ class HitachiClient:
         fan_speed: str | None = None,
     ) -> None:
         temp_val = temperature if temperature is not None else device.temperature
-        payload = {
+        # Only the 4 control fields in the body — routing params go in the URL (see _post_command)
+        control_data = {
             "OnOff":         on_off         if on_off         is not None else device.on_off,
             "OperationMode": operation_mode if operation_mode is not None else device.operation_mode,
             "SetTemp":       f"{temp_val}.0",
             "FanSpeed":      fan_speed      if fan_speed      is not None else device.fan_speed,
         }
-        full_payload = {"mod": MOD_AC, "act": ACT_SET_DEVICE, "dev": device.dev_id, **payload}
-        _LOGGER.error("set_state payload=%s", full_payload)
+        _LOGGER.debug("set_state dev=%s data=%s", device.dev_id, control_data)
         try:
-            await self._post(self._base, full_payload)
+            await self._post_command(device.dev_id, control_data)
         except aiohttp.ClientError as exc:
             raise HitachiGatewayError(f"Failed writing device {device.dev_id}: {exc}") from exc
 
